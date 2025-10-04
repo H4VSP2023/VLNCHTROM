@@ -8,12 +8,11 @@ import sys
 # --- Configuration ---
 app = Flask(__name__)
 
-# !!! IMPORTANT: CHANGE THIS SECRET_KEY !!!
-# This key MUST match the key used in your Termux client script.
-# Using an environment variable is the MOST secure practice on Render.
+# !!! IMPORTANT: CHANGE THIS SECRET_KEY on Render !!!
+# Set this as an Environment Variable named 'CHAT_SECRET_KEY' in your Render dashboard.
 SECRET_KEY = os.environ.get("CHAT_SECRET_KEY", "vuln_secure_chat_2025!") 
 if SECRET_KEY == "vuln_secure_chat_2025!":
-    print("WARNING: Using default SECRET_KEY. Change the CHAT_SECRET_KEY environment variable on Render!")
+    print("WARNING: Using default SECRET_KEY. Change the CHAT_SECRET_KEY environment variable on Render!", file=sys.stderr)
 
 # Simple in-memory message store (NOT persistent on Render restarts)
 messages = []
@@ -24,12 +23,13 @@ MAX_MESSAGES = 50
 def xor_encrypt_decrypt(data, key):
     """Encrypts or decrypts a string using a repeating XOR cipher."""
     key_len = len(key)
-    # Check if data is already bytes (e.g., from b64decode) or a string
+    # Convert string to bytes
     if isinstance(data, str):
         data = data.encode('utf-8')
         
     result = bytearray(data)
     
+    # 🐛 FIX: Ensure correct indentation for the loop body
     for i, byte in enumerate(result):
         # XOR the byte with the corresponding key character's ASCII value
         result[i] = byte ^ ord(key[i % key_len])
@@ -45,13 +45,15 @@ def xor_decrypt_api(encrypted_b64, key):
         key_len = len(key)
         result = bytearray(data)
         
+        # 🐛 FIX: Ensure correct indentation for the loop body
         for i, byte in enumerate(result):
+            # XOR the byte with the corresponding key character's ASCII value
             result[i] = byte ^ ord(key[i % key_len])
             
         return result.decode('utf-8')
-    except Exception:
-        # Log failure but return empty string to prevent server crash
-        print(f"Decryption failed for key: {key[:5]}...", file=sys.stderr)
+    except Exception as e:
+        # Log decryption failure
+        print(f"Decryption failed. Error: {e}", file=sys.stderr)
         return ""
 
 # --- API Endpoints ---
@@ -66,7 +68,6 @@ def get_messages():
         encrypted_msg = {
             "id": msg["id"],
             "timestamp": msg["timestamp"],
-            # Encrypt sensitive fields
             "name_enc": xor_encrypt_decrypt(msg["name"], SECRET_KEY),
             "text_enc": xor_encrypt_decrypt(msg["text"], SECRET_KEY)
         }
@@ -119,76 +120,5 @@ def home():
     return "VulnOS Secure Chat API is running!", 200
 
 # This is only for local testing, Render uses gunicorn
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
-            # XOR the byte with the corresponding key character's ASCII value
-            result[i] = byte ^ ord(key[i % key_len])
-            
-        return result.decode('utf-8')
-    except Exception:
-        # Return an empty string or raise error on failure
-        return ""
-
-# --- API Endpoints ---
-
-@app.route('/messages', methods=['GET'])
-def get_messages():
-    """Retrieves all messages, encrypted."""
-    encrypted_messages = []
-    
-    for msg in messages:
-        # Encrypt the name and text fields before sending
-        encrypted_msg = {
-            "id": msg["id"],
-            "timestamp": msg["timestamp"],
-            "name_enc": xor_encrypt_decrypt(msg["name"], SECRET_KEY),
-            "text_enc": xor_encrypt_decrypt(msg["text"], SECRET_KEY)
-        }
-        encrypted_messages.append(encrypted_msg)
-
-    # The array structure itself is JSON, but the sensitive fields are encrypted
-    return jsonify(encrypted_messages)
-
-@app.route('/messages', methods=['POST'])
-def post_message():
-    """Accepts an ENCRYPTED message and decrypts it."""
-    try:
-        data = request.get_json()
-        
-        # Check for encrypted fields
-        if not data or 'name_enc' not in data or 'message_enc' not in data:
-            return jsonify({"error": "Missing encrypted fields ('name_enc' or 'message_enc') in request body."}), 400
-
-        # Decrypt the received fields
-        name = xor_decrypt_api(data['name_enc'], SECRET_KEY)
-        text = xor_decrypt_api(data['message_enc'], SECRET_KEY)
-
-        if not name or not text:
-            return jsonify({"error": "Decryption failed or data is empty."}), 400
-        
-        # ... (rest of validation) ...
-        name = name.strip()
-        text = text.strip()
-
-        # Create the message structure
-        new_message = {
-            "id": len(messages) + 1,
-            "name": name,
-            "text": text,
-            "timestamp": datetime.now().strftime("%H:%M:%S")
-        }
-        
-        messages.append(new_message)
-        if len(messages) > 50:
-            del messages[0] 
-
-        print(f"[{new_message['timestamp']}] {name}: {text}")
-        return jsonify({"status": "Message sent"}), 201
-
-    except Exception as e:
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-# ... (home and local run blocks remain the same) ...
-
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
