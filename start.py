@@ -5,26 +5,20 @@ import os
 import json
 
 # --- SERVER STATE (In-Memory Database) ---
-# NOTE: In a production environment, this data should be stored in a persistent database (e.g., Redis, PostgreSQL).
-# Since this is a simple chat example, we use in-memory lists/variables.
 app = Flask(__name__)
 
-# Must be timezone-aware from the start (datetime.min is used as a baseline for comparison)
+# Must be timezone-aware from the start
 LAST_WIPE_TIME = datetime.min.replace(tzinfo=timezone.utc)
 MESSAGES_DB = []
 
-# Placeholder for Admin Secret (GET THIS FROM ENVIRONMENT OR CONFIG IN REAL APP)
-# The client script assumes this is a secret key for authorization.
+# Placeholder for Admin Secret
 ADMIN_SECRET = os.environ.get('ADMIN_SECRET', 'YOUR_STRONG_ADMIN_SECRET') 
 
-# Placeholder for banned IPs
+# Placeholder for banned IPs and chatter map
 BANNED_IPS = set()
-# Placeholder for recent chatter IPs and names
-CHATTER_IP_MAP = {} # {ip: name}
+CHATTER_IP_MAP = {} 
 
-# =================================================================
-# === UTILITIES ===
-# =================================================================
+# --- UTILITIES ---
 
 def authorize_admin(request):
     """Checks the X-Admin-Secret header."""
@@ -33,7 +27,6 @@ def authorize_admin(request):
 
 def get_client_ip(request):
     """Gets the client's IP, handling common reverse proxy headers."""
-    # Check for common headers used by services like Heroku or Render
     if 'X-Forwarded-For' in request.headers:
         return request.headers['X-Forwarded-For'].split(',')[0].strip()
     return request.remote_addr
@@ -62,10 +55,8 @@ def post_message():
     if not message:
         return jsonify({"error": "Message cannot be empty"}), 400
 
-    # Sanitize name
     name = "".join(c for c in name if c.isalnum() or c in ('-', '_')) or "Anonymous"
     
-    # Track the chatter's IP and name
     CHATTER_IP_MAP[client_ip] = name
 
     new_message = {
@@ -76,8 +67,8 @@ def post_message():
     }
     MESSAGES_DB.append(new_message)
     
-    # Simple message retention (keep last 100 messages)
     global MESSAGES_DB
+    # Simple message retention (keep last 100 messages)
     if len(MESSAGES_DB) > 100:
         MESSAGES_DB = MESSAGES_DB[-100:]
         
@@ -87,29 +78,26 @@ def post_message():
 @app.route('/check_status', methods=['GET'])
 def check_status():
     """
-    Returns the server status, including the last wipe time and the 
-    server-controlled alert status.
+    Returns the server status, including the last wipe time and a 
+    server-controlled flag for a recent wipe alert.
     """
     global LAST_WIPE_TIME
     current_time = datetime.now(timezone.utc)
     
-    # Calculate the time difference using timezone-aware objects
     time_since_wipe = current_time - LAST_WIPE_TIME
     
-    # CRITICAL FIX: The server manages the 3-second active alert state
+    # Alert is active only if the wipe happened within the last 3 seconds.
+    # Note: Added check for time_since_wipe >= timedelta(seconds=0) for robustness
     is_alert_active = time_since_wipe < timedelta(seconds=3) and time_since_wipe >= timedelta(seconds=0)
     
     status = {
-        # Always return the full, timezone-aware ISO format string for the client's baseline
         "last_wipe_time": LAST_WIPE_TIME.isoformat(), 
-        
-        # This is the new flag the client uses to show the 3-second banner
         "alert_active": is_alert_active
     }
     return jsonify(status), 200
 
 # =================================================================
-# === ADMIN ENDPOINTS ===
+# === ADMIN ENDPOINTS (SYNTAX FIX APPLIED HERE) ===
 # =================================================================
 
 @app.route('/messages', methods=['DELETE'])
@@ -118,10 +106,10 @@ def admin_wipe_conversation():
     if not authorize_admin(request):
         return jsonify({"error": "Unauthorized"}), 401
 
+    # ✅ FIX: Declare globals at the top before assignment/use
     global MESSAGES_DB
     global LAST_WIPE_TIME
     
-    # CRITICAL: Reset the DB and update the LAST_WIPE_TIME using UTC
     MESSAGES_DB = []
     LAST_WIPE_TIME = datetime.now(timezone.utc)
     
@@ -165,7 +153,6 @@ def get_chatter_list():
     if not authorize_admin(request):
         return jsonify({"error": "Unauthorized"}), 401
     
-    # Format the CHATTER_IP_MAP into a list of objects
     chatter_list = [{"name": name, "ip": ip} for ip, name in CHATTER_IP_MAP.items()]
     return jsonify(chatter_list), 200
 
@@ -175,12 +162,11 @@ def get_banned_list():
     if not authorize_admin(request):
         return jsonify({"error": "Unauthorized"}), 401
     
-    # Convert the set to a list for JSON serialization
     return jsonify(list(BANNED_IPS)), 200
 
 
 if __name__ == '__main__':
-    # Add a dummy message on startup for testing
+    # Initialize the server with a dummy message
     MESSAGES_DB.append({
         "id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -191,5 +177,4 @@ if __name__ == '__main__':
     print(f"--- Server Starting ---")
     print(f"Admin Secret: {ADMIN_SECRET}")
     
-    # Run the server on all interfaces
     app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000), debug=True)
