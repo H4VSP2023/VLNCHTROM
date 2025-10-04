@@ -8,11 +8,13 @@ import sys
 # --- Configuration ---
 app = Flask(__name__)
 
-# !!! IMPORTANT: CHANGE THIS SECRET_KEY on Render !!!
-# Set this as an Environment Variable named 'CHAT_SECRET_KEY' in your Render dashboard.
+# !!! IMPORTANT: Set 'CHAT_SECRET_KEY' as an Environment Variable in Render !!!
+# This key is used for XOR encryption/decryption.
 SECRET_KEY = os.environ.get("CHAT_SECRET_KEY", "vuln_secure_chat_2025!") 
-if SECRET_KEY == "vuln_secure_chat_2025!":
-    print("WARNING: Using default SECRET_KEY. Change the CHAT_SECRET_KEY environment variable on Render!", file=sys.stderr)
+
+# This key is used for the /messages DELETE endpoint authorization.
+# It MUST match the DELETE_SECRET in your Bash client.
+DELETE_CONVO_SECRET = "DELETE_CONVO_SECRET"
 
 # Simple in-memory message store (NOT persistent on Render restarts)
 messages = []
@@ -23,36 +25,30 @@ MAX_MESSAGES = 50
 def xor_encrypt_decrypt(data, key):
     """Encrypts or decrypts a string using a repeating XOR cipher."""
     key_len = len(key)
-    # Convert string to bytes
     if isinstance(data, str):
         data = data.encode('utf-8')
         
     result = bytearray(data)
     
-    # 🐛 FIX: Ensure correct indentation for the loop body
+    # Correctly indented loop
     for i, byte in enumerate(result):
-        # XOR the byte with the corresponding key character's ASCII value
         result[i] = byte ^ ord(key[i % key_len])
         
-    # Return Base64 encoded result for safe HTTP transfer
     return base64.b64encode(result).decode('utf-8')
 
 def xor_decrypt_api(encrypted_b64, key):
     """Decrypts a Base64 encoded string received by the API."""
     try:
-        # Decode Base64 first
         data = base64.b64decode(encrypted_b64.encode('utf-8'))
         key_len = len(key)
         result = bytearray(data)
         
-        # 🐛 FIX: Ensure correct indentation for the loop body
+        # Correctly indented loop
         for i, byte in enumerate(result):
-            # XOR the byte with the corresponding key character's ASCII value
             result[i] = byte ^ ord(key[i % key_len])
             
         return result.decode('utf-8')
     except Exception as e:
-        # Log decryption failure
         print(f"Decryption failed. Error: {e}", file=sys.stderr)
         return ""
 
@@ -64,7 +60,6 @@ def get_messages():
     encrypted_messages = []
     
     for msg in messages:
-        # Encrypt the name and text fields before sending
         encrypted_msg = {
             "id": msg["id"],
             "timestamp": msg["timestamp"],
@@ -84,7 +79,6 @@ def post_message():
         if not data or 'name_enc' not in data or 'message_enc' not in data:
             return jsonify({"error": "Missing encrypted fields ('name_enc' or 'message_enc')."}), 400
 
-        # Decrypt the received fields
         name = xor_decrypt_api(data['name_enc'], SECRET_KEY)
         text = xor_decrypt_api(data['message_enc'], SECRET_KEY)
 
@@ -94,7 +88,6 @@ def post_message():
         name = name.strip()
         text = text.strip()
 
-        # Create the message structure
         new_message = {
             "id": len(messages) + 1,
             "name": name,
@@ -102,7 +95,6 @@ def post_message():
             "timestamp": datetime.now().strftime("%H:%M:%S")
         }
         
-        # Add the message and enforce limit
         messages.append(new_message)
         if len(messages) > MAX_MESSAGES:
             del messages[0] 
@@ -113,6 +105,22 @@ def post_message():
     except Exception as e:
         print(f"POST Error: {e}", file=sys.stderr)
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
+
+@app.route('/messages', methods=['DELETE'])
+def delete_messages():
+    """Clears all messages from the in-memory store, requiring authorization."""
+    global messages
+    
+    # Check for authorization header
+    auth_header = request.headers.get('X-Admin-Secret')
+    
+    if auth_header != DELETE_CONVO_SECRET:
+        return jsonify({"error": "Unauthorized access to delete messages."}), 401
+    
+    messages = []
+    print("ALL CHAT MESSAGES CLEARED by authorized API DELETE request.")
+    return jsonify({"status": "All messages deleted"}), 200
+
 
 @app.route('/')
 def home():
