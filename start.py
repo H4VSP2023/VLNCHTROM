@@ -1,6 +1,6 @@
-import os
+Import os
 import sys
-from datetime import datetime, timezone # <-- IMPORT TIMEZONE
+from datetime import datetime, timezone 
 from flask import Flask, request, jsonify
 from markupsafe import escape
 from uuid import uuid4
@@ -19,6 +19,7 @@ LAST_WIPE_TIME = datetime.now(timezone.utc)
 
 def get_client_ip(req):
     if 'X-Forwarded-For' in req.headers:
+        # In Render, X-Forwarded-For is common. Use the first IP.
         return req.headers['X-Forwarded-For'].split(',')[0].strip()
     return req.remote_addr
 
@@ -36,15 +37,19 @@ def check_admin_secret(req):
 
 def log_chatter(name, ip):
     global chatter_ips
-    now = datetime.now()
+    # Use timezone-aware time for consistency
+    now = datetime.now(timezone.utc)
     
+    # Update existing chatter entry
     for i, (_, stored_ip, _) in enumerate(chatter_ips):
         if stored_ip == ip:
             chatter_ips[i] = (name, ip, now)
             return
             
+    # Add new chatter entry
     chatter_ips.append((name, ip, now))
     
+    # Enforce limit (100)
     if len(chatter_ips) > 100:
         chatter_ips.pop(0)
 
@@ -74,18 +79,25 @@ def post_message():
         
         log_chatter(name, client_ip)
         
+        # --- FIX START: Use ISO format with timezone for client compatibility ---
+        timestamp_str = datetime.now(timezone.utc).isoformat()
+        
         new_message = {
             "id": str(uuid4()), 
             "name": name,
             "text": text,
-            "timestamp": datetime.now().strftime("%H:%M:%S")
+            "timestamp": timestamp_str # Full ISO format
         }
+        # --- FIX END ---
         
         messages.append(new_message)
         if len(messages) > MAX_MESSAGES:
             messages.pop(0) 
 
-        print(f"[{new_message['timestamp']}] {name} ({client_ip}): {text}")
+        # Log using only the time part for cleaner console output
+        time_part = datetime.fromisoformat(timestamp_str).strftime("%H:%M:%S")
+        print(f"[{time_part}] {name} ({client_ip}): {text}")
+        
         return jsonify({"status": "Message sent", "id": new_message["id"]}), 201
 
     except Exception as e:
@@ -103,6 +115,8 @@ def delete_messages():
     messages = []
     LAST_WIPE_TIME = datetime.now(timezone.utc)
     print("ALL CHAT MESSAGES CLEARED.")
+    
+    # Server correctly returns the precise wipe time in ISO format
     return jsonify({"status": "All messages deleted", "wipe_time": LAST_WIPE_TIME.isoformat()}), 200
 
 @app.route('/admin/chatter_list', methods=['GET'])
@@ -166,6 +180,7 @@ def unban_user():
 
 @app.route('/check_status', methods=['GET'])
 def check_status():
+    # Server correctly returns the precise wipe time in ISO format for client check
     return jsonify({
         "status": "online",
         "last_wipe_time": LAST_WIPE_TIME.isoformat(),
@@ -178,4 +193,5 @@ def home():
     return "VulnSecChatRoom API is running!", 200
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
+    # Using the PORT from environment variables as suggested, good practice for Render/Heroku
+    app.run(debug=False, host='0.0.0.0', port=os.environ.get('PORT', 5000))
