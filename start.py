@@ -11,7 +11,7 @@ app = Flask(__name__)
 # This key MUST be kept secret and MUST match the client's DELETE_SECRET
 DELETE_CONVO_SECRET = "VSP4137"
 
-# Simple in-memory storage (NOT persistent on Render restarts)
+# Simple in-memory storage (NOT persistent on restarts)
 messages = []
 banned_ips = set()
 # List to track recent chatters: [(name, ip, last_seen_time)]
@@ -19,7 +19,6 @@ chatter_ips = []
 MAX_MESSAGES = 50
 MAX_NAME_LENGTH = 20
 MAX_TEXT_LENGTH = 200
-# Initialize LAST_WIPE_TIME to the start of the program
 LAST_WIPE_TIME = datetime.now() 
 
 # --- Utility Functions (IP & Sanitization) ---
@@ -27,7 +26,6 @@ LAST_WIPE_TIME = datetime.now()
 def get_client_ip(req):
     """Retrieves the client IP address, accounting for proxies like Render."""
     if 'X-Forwarded-For' in req.headers:
-        # X-Forwarded-For can contain a list of IPs; we take the first (client's IP)
         return req.headers['X-Forwarded-For'].split(',')[0].strip()
     return req.remote_addr
 
@@ -38,7 +36,6 @@ def sanitize_and_validate(data, max_len):
     data = data.strip()
     if len(data) > max_len:
         data = data[:max_len]
-    # Neutralize HTML/JS characters to prevent Cross-Site Scripting (XSS)
     return str(escape(data))
 
 def check_admin_secret(req):
@@ -54,16 +51,14 @@ def log_chatter(name, ip):
     # 1. Check if this IP already exists
     for i, (_, stored_ip, _) in enumerate(chatter_ips):
         if stored_ip == ip:
-            # 2. Update the name and last seen time
+            # 2. Update the name (in case they changed it) and last seen time
             chatter_ips[i] = (name, ip, now)
             return
             
     # 3. Add new entry if IP not found
     chatter_ips.append((name, ip, now))
     
-    # Keep the list reasonably sized (e.g., last 100 unique IPs)
     if len(chatter_ips) > 100:
-        # Remove the oldest entry
         chatter_ips.pop(0)
 
 # --- API Endpoints ---
@@ -93,7 +88,6 @@ def post_message():
         if not name or not text:
             return jsonify({"error": "Content is empty or invalid after cleaning."}), 400
         
-        # Log the user's IP and name (updates if IP is existing)
         log_chatter(name, client_ip)
         
         new_message = {
@@ -209,5 +203,4 @@ def home():
     return "Secure Chat API is running!", 200
 
 if __name__ == '__main__':
-    # Use environment port or default to 5000
     app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
