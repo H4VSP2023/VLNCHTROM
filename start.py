@@ -12,7 +12,7 @@ LAST_WIPE_TIME = datetime.min.replace(tzinfo=timezone.utc)
 MESSAGES_DB = []
 
 # Placeholder for Admin Secret
-ADMIN_SECRET = os.environ.get('ADMIN_SECRET', 'YOUR_STRONG_ADMIN_SECRET') 
+ADMIN_SECRET = os.environ.get('ADMIN_SECRET', 'VSP4137') 
 
 # Placeholder for banned IPs and chatter map
 BANNED_IPS = set()
