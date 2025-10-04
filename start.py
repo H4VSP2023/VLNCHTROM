@@ -1,216 +1,195 @@
+from flask import Flask, jsonify, request
+from datetime import datetime, timezone, timedelta
+import uuid
 import os
-import sys
-from datetime import datetime, timezone # <-- IMPORT TIMEZONE
-from flask import Flask, request, jsonify
-from markupsafe import escape
-from uuid import uuid4
+import json
 
-# --- Configuration ---
+# --- SERVER STATE (In-Memory Database) ---
+# NOTE: In a production environment, this data should be stored in a persistent database (e.g., Redis, PostgreSQL).
+# Since this is a simple chat example, we use in-memory lists/variables.
 app = Flask(__name__)
 
-# This key MUST be kept secret and MUST match the client's DELETE_SECRET
-DELETE_CONVO_SECRET = "VSP4137"
+# Must be timezone-aware from the start (datetime.min is used as a baseline for comparison)
+LAST_WIPE_TIME = datetime.min.replace(tzinfo=timezone.utc)
+MESSAGES_DB = []
 
-# Simple in-memory storage (NOT persistent on restarts)
-messages = []
-banned_ips = set()
-# List to track recent chatters: [(name, ip, last_seen_time)]
-chatter_ips = []
-MAX_MESSAGES = 50
-MAX_NAME_LENGTH = 20
-MAX_TEXT_LENGTH = 200
-# INITIALIZE LAST_WIPE_TIME TO BE TIMEZONE AWARE
-LAST_WIPE_TIME = datetime.now(timezone.utc) 
+# Placeholder for Admin Secret (GET THIS FROM ENVIRONMENT OR CONFIG IN REAL APP)
+# The client script assumes this is a secret key for authorization.
+ADMIN_SECRET = os.environ.get('ADMIN_SECRET', 'YOUR_STRONG_ADMIN_SECRET') 
 
-# --- Utility Functions (IP & Sanitization) ---
+# Placeholder for banned IPs
+BANNED_IPS = set()
+# Placeholder for recent chatter IPs and names
+CHATTER_IP_MAP = {} # {ip: name}
 
-# ... (all other utility functions remain the same) ...
+# =================================================================
+# === UTILITIES ===
+# =================================================================
 
-def get_client_ip(req):
-    """Retrieves the client IP address, accounting for proxies like Render."""
-    if 'X-Forwarded-For' in req.headers:
-        return req.headers['X-Forwarded-For'].split(',')[0].strip()
-    return req.remote_addr
+def authorize_admin(request):
+    """Checks the X-Admin-Secret header."""
+    secret = request.headers.get('X-Admin-Secret')
+    return secret == ADMIN_SECRET
 
-def sanitize_and_validate(data, max_len):
-    """Sanitizes data to prevent XSS and enforces a length limit."""
-    if not isinstance(data, str):
-        return None
-    data = data.strip()
-    if len(data) > max_len:
-        data = data[:max_len]
-    return str(escape(data))
+def get_client_ip(request):
+    """Gets the client's IP, handling common reverse proxy headers."""
+    # Check for common headers used by services like Heroku or Render
+    if 'X-Forwarded-For' in request.headers:
+        return request.headers['X-Forwarded-For'].split(',')[0].strip()
+    return request.remote_addr
 
-def check_admin_secret(req):
-    """Checks the X-Admin-Secret header for authorization."""
-    auth_header = req.headers.get('X-Admin-Secret')
-    return auth_header == DELETE_CONVO_SECRET
-
-def log_chatter(name, ip):
-    """Adds or updates a chatter's entry based on IP. Does NOT duplicate IPs."""
-    global chatter_ips
-    now = datetime.now()
-    
-    # 1. Check if this IP already exists
-    for i, (_, stored_ip, _) in enumerate(chatter_ips):
-        if stored_ip == ip:
-            # 2. Update the name (in case they changed it) and last seen time
-            chatter_ips[i] = (name, ip, now)
-            return
-            
-    # 3. Add new entry if IP not found
-    chatter_ips.append((name, ip, now))
-    
-    if len(chatter_ips) > 100:
-        chatter_ips.pop(0)
-
-# --------------------------------------------------------------------------------
-
-# --- API Endpoints ---
+# =================================================================
+# === CORE ENDPOINTS ===
+# =================================================================
 
 @app.route('/messages', methods=['GET'])
 def get_messages():
-    """Retrieves all messages."""
-    return jsonify(messages)
+    """Returns the current list of messages."""
+    return jsonify(MESSAGES_DB), 200
 
 @app.route('/messages', methods=['POST'])
 def post_message():
-    # ... (function body remains the same) ...
-    """Accepts a message, validates/sanitizes it, and checks for bans."""
+    """Adds a new message to the database."""
     client_ip = get_client_ip(request)
     
-    if client_ip in banned_ips:
-        return jsonify({"error": "Your IP address is banned from this chatroom."}), 403
+    if client_ip in BANNED_IPS:
+        return jsonify({"error": "Forbidden: You are banned from the chatroom."}), 403
 
-    try:
-        data = request.get_json()
-        
-        if not data or 'name' not in data or 'message' not in data:
-            return jsonify({"error": "Missing required fields."}), 400
+    data = request.json
+    name = data.get('name', 'Anonymous')
+    message = data.get('message', '').strip()
 
-        name = sanitize_and_validate(data.get('name'), MAX_NAME_LENGTH)
-        text = sanitize_and_validate(data.get('message'), MAX_TEXT_LENGTH)
+    if not message:
+        return jsonify({"error": "Message cannot be empty"}), 400
 
-        if not name or not text:
-            return jsonify({"error": "Content is empty or invalid after cleaning."}), 400
-        
-        log_chatter(name, client_ip)
-        
-        new_message = {
-            "id": str(uuid4()), 
-            "name": name,
-            "text": text,
-            "timestamp": datetime.now().strftime("%H:%M:%S")
-        }
-        
-        messages.append(new_message)
-        if len(messages) > MAX_MESSAGES:
-            messages.pop(0) 
-
-        print(f"[{new_message['timestamp']}] {name} ({client_ip}): {text}")
-        return jsonify({"status": "Message sent", "id": new_message["id"]}), 201
-
-    except Exception as e:
-        print(f"POST Error: {e}", file=sys.stderr)
-        return jsonify({"error": f"Internal server error: {str(e)}"}), 500
-
-@app.route('/messages', methods=['DELETE'])
-def delete_messages():
-    """Clears all messages and resets the wipe time, requiring authorization."""
-    global messages
-    global LAST_WIPE_TIME
+    # Sanitize name
+    name = "".join(c for c in name if c.isalnum() or c in ('-', '_')) or "Anonymous"
     
-    if not check_admin_secret(request):
-        return jsonify({"error": "Unauthorized access to delete messages."}), 401
+    # Track the chatter's IP and name
+    CHATTER_IP_MAP[client_ip] = name
+
+    new_message = {
+        "id": str(uuid.uuid4()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "name": name,
+        "text": message
+    }
+    MESSAGES_DB.append(new_message)
     
-    messages = []
-    # FIX: Use UTC Timezone Aware datetime
-    LAST_WIPE_TIME = datetime.now(timezone.utc)
-    print("ALL CHAT MESSAGES CLEARED.")
-    return jsonify({"status": "All messages deleted", "wipe_time": LAST_WIPE_TIME.isoformat()}), 200
-
-# --------------------------------------------------------------------------------
-
-# ... (all admin endpoints remain the same) ...
-
-@app.route('/admin/chatter_list', methods=['GET'])
-def get_chatter_list():
-    """Returns a list of recent chatters (Name and IP) for admin review."""
-    if not check_admin_secret(request):
-        return jsonify({"error": "Unauthorized access to chatter list."}), 401
+    # Simple message retention (keep last 100 messages)
+    global MESSAGES_DB
+    if len(MESSAGES_DB) > 100:
+        MESSAGES_DB = MESSAGES_DB[-100:]
         
-    formatted_list = [
-        {"name": name, "ip": ip} 
-        for name, ip, _ in chatter_ips
-    ]
-    return jsonify(formatted_list)
+    return jsonify({"status": "Message sent"}), 201
 
-@app.route('/admin/banned_list', methods=['GET'])
-def get_banned_list():
-    """Returns the list of currently banned IPs, requiring authorization."""
-    if not check_admin_secret(request):
-        return jsonify({"error": "Unauthorized access to banned list."}), 401
-        
-    return jsonify(list(banned_ips)), 200
-
-@app.route('/admin/ban', methods=['POST'])
-def ban_user():
-    # ... (function body remains the same) ...
-    if not check_admin_secret(request):
-        return jsonify({"error": "Unauthorized access to ban users."}), 401
-
-    try:
-        data = request.get_json()
-        ip_to_ban = data.get('ip')
-        
-        if not ip_to_ban:
-            return jsonify({"error": "Missing 'ip' field to ban."}), 400
-        
-        banned_ips.add(ip_to_ban)
-        print(f"IP BANNED: {ip_to_ban}")
-        return jsonify({"status": f"IP {ip_to_ban} has been banned."}), 200
-        
-    except Exception as e:
-        return jsonify({"error": f"Error banning IP: {str(e)}"}), 500
-
-@app.route('/admin/unban', methods=['POST'])
-def unban_user():
-    # ... (function body remains the same) ...
-    if not check_admin_secret(request):
-        return jsonify({"error": "Unauthorized access to unban users."}), 401
-
-    try:
-        data = request.get_json()
-        ip_to_unban = data.get('ip')
-        
-        if not ip_to_unban:
-            return jsonify({"error": "Missing 'ip' field to unban."}), 400
-            
-        if ip_to_unban in banned_ips:
-            banned_ips.remove(ip_to_unban)
-            print(f"IP UNBANNED: {ip_to_unban}")
-            return jsonify({"status": f"IP {ip_to_unban} has been unbanned."}), 200
-        else:
-            return jsonify({"status": f"IP {ip_to_unban} was not banned."}), 200
-        
-    except Exception as e:
-        return jsonify({"error": f"Error unbanning IP: {str(e)}"}), 500
 
 @app.route('/check_status', methods=['GET'])
 def check_status():
-    """Returns status information, including the last wipe time."""
-    # FIX: Ensure LAST_WIPE_TIME is always formatted correctly (isoformat handles the UTC timezone)
-    return jsonify({
-        "status": "online",
-        "last_wipe_time": LAST_WIPE_TIME.isoformat(),
-        "banned_ips_count": len(banned_ips)
-    }), 200
+    """
+    Returns the server status, including the last wipe time and the 
+    server-controlled alert status.
+    """
+    global LAST_WIPE_TIME
+    current_time = datetime.now(timezone.utc)
+    
+    # Calculate the time difference using timezone-aware objects
+    time_since_wipe = current_time - LAST_WIPE_TIME
+    
+    # CRITICAL FIX: The server manages the 3-second active alert state
+    is_alert_active = time_since_wipe < timedelta(seconds=3) and time_since_wipe >= timedelta(seconds=0)
+    
+    status = {
+        # Always return the full, timezone-aware ISO format string for the client's baseline
+        "last_wipe_time": LAST_WIPE_TIME.isoformat(), 
+        
+        # This is the new flag the client uses to show the 3-second banner
+        "alert_active": is_alert_active
+    }
+    return jsonify(status), 200
 
+# =================================================================
+# === ADMIN ENDPOINTS ===
+# =================================================================
 
-@app.route('/')
-def home():
-    """Simple status check."""
-    return "Secure Chat API is running!", 200
+@app.route('/messages', methods=['DELETE'])
+def admin_wipe_conversation():
+    """Admin endpoint to wipe all messages and update the wipe time."""
+    if not authorize_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    global MESSAGES_DB
+    global LAST_WIPE_TIME
+    
+    # CRITICAL: Reset the DB and update the LAST_WIPE_TIME using UTC
+    MESSAGES_DB = []
+    LAST_WIPE_TIME = datetime.now(timezone.utc)
+    
+    return jsonify({"status": "Conversation history wiped"}), 200
+
+@app.route('/admin/ban', methods=['POST'])
+def admin_ban_user():
+    """Admin endpoint to ban a user by IP."""
+    if not authorize_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    data = request.json
+    ip = data.get('ip')
+    if not ip:
+        return jsonify({"error": "IP address required"}), 400
+
+    global BANNED_IPS
+    BANNED_IPS.add(ip)
+    return jsonify({"status": f"IP {ip} banned"}), 200
+
+@app.route('/admin/unban', methods=['POST'])
+def admin_unban_user():
+    """Admin endpoint to unban a user by IP."""
+    if not authorize_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    data = request.json
+    ip = data.get('ip')
+    if not ip:
+        return jsonify({"error": "IP address required"}), 400
+
+    global BANNED_IPS
+    if ip in BANNED_IPS:
+        BANNED_IPS.remove(ip)
+        return jsonify({"status": f"IP {ip} unbanned"}), 200
+    return jsonify({"error": "IP not found in banned list"}), 404
+
+@app.route('/admin/chatter_list', methods=['GET'])
+def get_chatter_list():
+    """Returns a list of recent chatters with their IPs."""
+    if not authorize_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    # Format the CHATTER_IP_MAP into a list of objects
+    chatter_list = [{"name": name, "ip": ip} for ip, name in CHATTER_IP_MAP.items()]
+    return jsonify(chatter_list), 200
+
+@app.route('/admin/banned_list', methods=['GET'])
+def get_banned_list():
+    """Returns the list of banned IPs."""
+    if not authorize_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    # Convert the set to a list for JSON serialization
+    return jsonify(list(BANNED_IPS)), 200
+
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
+    # Add a dummy message on startup for testing
+    MESSAGES_DB.append({
+        "id": str(uuid.uuid4()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "name": "System",
+        "text": "Welcome! Server initialized."
+    })
+    
+    print(f"--- Server Starting ---")
+    print(f"Admin Secret: {ADMIN_SECRET}")
+    
+    # Run the server on all interfaces
+    app.run(host='0.0.0.0', port=os.environ.get('PORT', 5000), debug=True)
