@@ -8,22 +8,24 @@ from uuid import uuid4
 # --- Configuration ---
 app = Flask(__name__)
 
-# This key is used for ADMIN authorization (Delete, Ban).
+# This key MUST be kept secret and MUST match the client's DELETE_SECRET
 DELETE_CONVO_SECRET = "VSP4137"
 
 # Simple in-memory storage (NOT persistent on Render restarts)
 messages = []
-banned_ips = set() # Store banned IPs in a set for quick lookup
+banned_ips = set()
+# List to track recent chatters: [(name, ip, last_seen_time)]
+chatter_ips = []
 MAX_MESSAGES = 50
 MAX_NAME_LENGTH = 20
 MAX_TEXT_LENGTH = 200
-LAST_WIPE_TIME = datetime.now() # Used for client status checks
+# Initialize LAST_WIPE_TIME to the start of the program
+LAST_WIPE_TIME = datetime.now() 
 
 # --- Utility Functions (IP & Sanitization) ---
 
 def get_client_ip(req):
     """Retrieves the client IP address, accounting for proxies like Render."""
-    # Check for common proxy headers first
     if 'X-Forwarded-For' in req.headers:
         # X-Forwarded-For can contain a list of IPs; we take the first (client's IP)
         return req.headers['X-Forwarded-For'].split(',')[0].strip()
@@ -36,6 +38,7 @@ def sanitize_and_validate(data, max_len):
     data = data.strip()
     if len(data) > max_len:
         data = data[:max_len]
+    # Neutralize HTML/JS characters to prevent Cross-Site Scripting (XSS)
     return str(escape(data))
 
 def check_admin_secret(req):
@@ -43,12 +46,31 @@ def check_admin_secret(req):
     auth_header = req.headers.get('X-Admin-Secret')
     return auth_header == DELETE_CONVO_SECRET
 
+def log_chatter(name, ip):
+    """Adds or updates a chatter's entry based on IP. Does NOT duplicate IPs."""
+    global chatter_ips
+    now = datetime.now()
+    
+    # 1. Check if this IP already exists
+    for i, (_, stored_ip, _) in enumerate(chatter_ips):
+        if stored_ip == ip:
+            # 2. Update the name and last seen time
+            chatter_ips[i] = (name, ip, now)
+            return
+            
+    # 3. Add new entry if IP not found
+    chatter_ips.append((name, ip, now))
+    
+    # Keep the list reasonably sized (e.g., last 100 unique IPs)
+    if len(chatter_ips) > 100:
+        # Remove the oldest entry
+        chatter_ips.pop(0)
+
 # --- API Endpoints ---
 
 @app.route('/messages', methods=['GET'])
 def get_messages():
     """Retrieves all messages."""
-    # Messages are returned directly as they are sanitized upon POST
     return jsonify(messages)
 
 @app.route('/messages', methods=['POST'])
@@ -56,7 +78,6 @@ def post_message():
     """Accepts a message, validates/sanitizes it, and checks for bans."""
     client_ip = get_client_ip(request)
     
-    # --- 1. Ban Check ---
     if client_ip in banned_ips:
         return jsonify({"error": "Your IP address is banned from this chatroom."}), 403
 
@@ -64,16 +85,17 @@ def post_message():
         data = request.get_json()
         
         if not data or 'name' not in data or 'message' not in data:
-            return jsonify({"error": "Missing required fields ('name' or 'message')."}), 400
+            return jsonify({"error": "Missing required fields."}), 400
 
-        # --- 2. Sanitize and Validate Input ---
         name = sanitize_and_validate(data.get('name'), MAX_NAME_LENGTH)
         text = sanitize_and_validate(data.get('message'), MAX_TEXT_LENGTH)
 
         if not name or not text:
-            return jsonify({"error": "Message content or name is empty or invalid after cleaning."}), 400
+            return jsonify({"error": "Content is empty or invalid after cleaning."}), 400
         
-        # --- 3. Create and Store Message ---
+        # Log the user's IP and name (updates if IP is existing)
+        log_chatter(name, client_ip)
+        
         new_message = {
             "id": str(uuid4()), 
             "name": name,
@@ -82,8 +104,6 @@ def post_message():
         }
         
         messages.append(new_message)
-        
-        # Enforce max capacity
         if len(messages) > MAX_MESSAGES:
             messages.pop(0) 
 
@@ -105,8 +125,30 @@ def delete_messages():
     
     messages = []
     LAST_WIPE_TIME = datetime.now()
-    print("ALL CHAT MESSAGES CLEARED by authorized API DELETE request.")
+    print("ALL CHAT MESSAGES CLEARED.")
     return jsonify({"status": "All messages deleted", "wipe_time": LAST_WIPE_TIME.isoformat()}), 200
+
+# --- Admin Endpoints (Require Secret) ---
+
+@app.route('/admin/chatter_list', methods=['GET'])
+def get_chatter_list():
+    """Returns a list of recent chatters (Name and IP) for admin review."""
+    if not check_admin_secret(request):
+        return jsonify({"error": "Unauthorized access to chatter list."}), 401
+        
+    formatted_list = [
+        {"name": name, "ip": ip} 
+        for name, ip, _ in chatter_ips
+    ]
+    return jsonify(formatted_list)
+
+@app.route('/admin/banned_list', methods=['GET'])
+def get_banned_list():
+    """Returns the list of currently banned IPs, requiring authorization."""
+    if not check_admin_secret(request):
+        return jsonify({"error": "Unauthorized access to banned list."}), 401
+        
+    return jsonify(list(banned_ips)), 200
 
 @app.route('/admin/ban', methods=['POST'])
 def ban_user():
@@ -167,4 +209,5 @@ def home():
     return "Secure Chat API is running!", 200
 
 if __name__ == '__main__':
+    # Use environment port or default to 5000
     app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
