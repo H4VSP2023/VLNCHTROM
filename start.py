@@ -1,105 +1,93 @@
-import json
-from datetime import datetime
-from flask import Flask, request, jsonify
-import base64
 import os
 import sys
+from datetime import datetime
+from flask import Flask, request, jsonify
+from markupsafe import escape
+from uuid import uuid4
 
 # --- Configuration ---
 app = Flask(__name__)
 
-# !!! IMPORTANT: Set 'CHAT_SECRET_KEY' as an Environment Variable in Render !!!
-# This key is used for XOR encryption/decryption.
-SECRET_KEY = os.environ.get("CHAT_SECRET_KEY", "vuln_secure_chat_2025!") 
+# This key is used for ADMIN authorization (Delete, Ban).
+DELETE_CONVO_SECRET = "VSP4137"
 
-# This key is used for the /messages DELETE endpoint authorization.
-# It MUST match the DELETE_SECRET in your Bash client.
-DELETE_CONVO_SECRET = "DELETE_CONVO_SECRET"
-
-# Simple in-memory message store (NOT persistent on Render restarts)
+# Simple in-memory storage (NOT persistent on Render restarts)
 messages = []
+banned_ips = set() # Store banned IPs in a set for quick lookup
 MAX_MESSAGES = 50
+MAX_NAME_LENGTH = 20
+MAX_TEXT_LENGTH = 200
+LAST_WIPE_TIME = datetime.now() # Used for client status checks
 
-# --- Utility Functions (Encryption/Decryption) ---
+# --- Utility Functions (IP & Sanitization) ---
 
-def xor_encrypt_decrypt(data, key):
-    """Encrypts or decrypts a string using a repeating XOR cipher."""
-    key_len = len(key)
-    if isinstance(data, str):
-        data = data.encode('utf-8')
-        
-    result = bytearray(data)
-    
-    # Correctly indented loop
-    for i, byte in enumerate(result):
-        result[i] = byte ^ ord(key[i % key_len])
-        
-    return base64.b64encode(result).decode('utf-8')
+def get_client_ip(req):
+    """Retrieves the client IP address, accounting for proxies like Render."""
+    # Check for common proxy headers first
+    if 'X-Forwarded-For' in req.headers:
+        # X-Forwarded-For can contain a list of IPs; we take the first (client's IP)
+        return req.headers['X-Forwarded-For'].split(',')[0].strip()
+    return req.remote_addr
 
-def xor_decrypt_api(encrypted_b64, key):
-    """Decrypts a Base64 encoded string received by the API."""
-    try:
-        data = base64.b64decode(encrypted_b64.encode('utf-8'))
-        key_len = len(key)
-        result = bytearray(data)
-        
-        # Correctly indented loop
-        for i, byte in enumerate(result):
-            result[i] = byte ^ ord(key[i % key_len])
-            
-        return result.decode('utf-8')
-    except Exception as e:
-        print(f"Decryption failed. Error: {e}", file=sys.stderr)
-        return ""
+def sanitize_and_validate(data, max_len):
+    """Sanitizes data to prevent XSS and enforces a length limit."""
+    if not isinstance(data, str):
+        return None
+    data = data.strip()
+    if len(data) > max_len:
+        data = data[:max_len]
+    return str(escape(data))
+
+def check_admin_secret(req):
+    """Checks the X-Admin-Secret header for authorization."""
+    auth_header = req.headers.get('X-Admin-Secret')
+    return auth_header == DELETE_CONVO_SECRET
 
 # --- API Endpoints ---
 
 @app.route('/messages', methods=['GET'])
 def get_messages():
-    """Retrieves all messages, with sensitive fields encrypted."""
-    encrypted_messages = []
-    
-    for msg in messages:
-        encrypted_msg = {
-            "id": msg["id"],
-            "timestamp": msg["timestamp"],
-            "name_enc": xor_encrypt_decrypt(msg["name"], SECRET_KEY),
-            "text_enc": xor_encrypt_decrypt(msg["text"], SECRET_KEY)
-        }
-        encrypted_messages.append(encrypted_msg)
-
-    return jsonify(encrypted_messages)
+    """Retrieves all messages."""
+    # Messages are returned directly as they are sanitized upon POST
+    return jsonify(messages)
 
 @app.route('/messages', methods=['POST'])
 def post_message():
-    """Accepts an ENCRYPTED message and decrypts it."""
+    """Accepts a message, validates/sanitizes it, and checks for bans."""
+    client_ip = get_client_ip(request)
+    
+    # --- 1. Ban Check ---
+    if client_ip in banned_ips:
+        return jsonify({"error": "Your IP address is banned from this chatroom."}), 403
+
     try:
         data = request.get_json()
         
-        if not data or 'name_enc' not in data or 'message_enc' not in data:
-            return jsonify({"error": "Missing encrypted fields ('name_enc' or 'message_enc')."}), 400
+        if not data or 'name' not in data or 'message' not in data:
+            return jsonify({"error": "Missing required fields ('name' or 'message')."}), 400
 
-        name = xor_decrypt_api(data['name_enc'], SECRET_KEY)
-        text = xor_decrypt_api(data['message_enc'], SECRET_KEY)
+        # --- 2. Sanitize and Validate Input ---
+        name = sanitize_and_validate(data.get('name'), MAX_NAME_LENGTH)
+        text = sanitize_and_validate(data.get('message'), MAX_TEXT_LENGTH)
 
         if not name or not text:
-            return jsonify({"error": "Decryption failed or decrypted data is empty."}), 400
+            return jsonify({"error": "Message content or name is empty or invalid after cleaning."}), 400
         
-        name = name.strip()
-        text = text.strip()
-
+        # --- 3. Create and Store Message ---
         new_message = {
-            "id": len(messages) + 1,
+            "id": str(uuid4()), 
             "name": name,
             "text": text,
             "timestamp": datetime.now().strftime("%H:%M:%S")
         }
         
         messages.append(new_message)
+        
+        # Enforce max capacity
         if len(messages) > MAX_MESSAGES:
-            del messages[0] 
+            messages.pop(0) 
 
-        print(f"[{new_message['timestamp']}] {name}: {text}")
+        print(f"[{new_message['timestamp']}] {name} ({client_ip}): {text}")
         return jsonify({"status": "Message sent", "id": new_message["id"]}), 201
 
     except Exception as e:
@@ -108,25 +96,75 @@ def post_message():
 
 @app.route('/messages', methods=['DELETE'])
 def delete_messages():
-    """Clears all messages from the in-memory store, requiring authorization."""
+    """Clears all messages and resets the wipe time, requiring authorization."""
     global messages
+    global LAST_WIPE_TIME
     
-    # Check for authorization header
-    auth_header = request.headers.get('X-Admin-Secret')
-    
-    if auth_header != DELETE_CONVO_SECRET:
+    if not check_admin_secret(request):
         return jsonify({"error": "Unauthorized access to delete messages."}), 401
     
     messages = []
+    LAST_WIPE_TIME = datetime.now()
     print("ALL CHAT MESSAGES CLEARED by authorized API DELETE request.")
-    return jsonify({"status": "All messages deleted"}), 200
+    return jsonify({"status": "All messages deleted", "wipe_time": LAST_WIPE_TIME.isoformat()}), 200
+
+@app.route('/admin/ban', methods=['POST'])
+def ban_user():
+    """Bans a user by IP, requiring authorization."""
+    if not check_admin_secret(request):
+        return jsonify({"error": "Unauthorized access to ban users."}), 401
+
+    try:
+        data = request.get_json()
+        ip_to_ban = data.get('ip')
+        
+        if not ip_to_ban:
+            return jsonify({"error": "Missing 'ip' field to ban."}), 400
+        
+        banned_ips.add(ip_to_ban)
+        print(f"IP BANNED: {ip_to_ban}")
+        return jsonify({"status": f"IP {ip_to_ban} has been banned."}), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Error banning IP: {str(e)}"}), 500
+
+@app.route('/admin/unban', methods=['POST'])
+def unban_user():
+    """Unbans a user by IP, requiring authorization."""
+    if not check_admin_secret(request):
+        return jsonify({"error": "Unauthorized access to unban users."}), 401
+
+    try:
+        data = request.get_json()
+        ip_to_unban = data.get('ip')
+        
+        if not ip_to_unban:
+            return jsonify({"error": "Missing 'ip' field to unban."}), 400
+            
+        if ip_to_unban in banned_ips:
+            banned_ips.remove(ip_to_unban)
+            print(f"IP UNBANNED: {ip_to_unban}")
+            return jsonify({"status": f"IP {ip_to_unban} has been unbanned."}), 200
+        else:
+            return jsonify({"status": f"IP {ip_to_unban} was not banned."}), 200
+        
+    except Exception as e:
+        return jsonify({"error": f"Error unbanning IP: {str(e)}"}), 500
+
+@app.route('/check_status', methods=['GET'])
+def check_status():
+    """Returns status information, including the last wipe time."""
+    return jsonify({
+        "status": "online",
+        "last_wipe_time": LAST_WIPE_TIME.isoformat(),
+        "banned_ips_count": len(banned_ips)
+    }), 200
 
 
 @app.route('/')
 def home():
     """Simple status check."""
-    return "VulnOS Secure Chat API is running!", 200
+    return "Secure Chat API is running!", 200
 
-# This is only for local testing, Render uses gunicorn
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=os.environ.get('PORT', 5000))
