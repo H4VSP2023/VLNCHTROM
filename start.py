@@ -1,6 +1,6 @@
-import os
+Import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone # <-- IMPORT TIMEZONE
 from flask import Flask, request, jsonify
 from markupsafe import escape
 from uuid import uuid4
@@ -19,9 +19,12 @@ chatter_ips = []
 MAX_MESSAGES = 50
 MAX_NAME_LENGTH = 20
 MAX_TEXT_LENGTH = 200
-LAST_WIPE_TIME = datetime.now() 
+# INITIALIZE LAST_WIPE_TIME TO BE TIMEZONE AWARE
+LAST_WIPE_TIME = datetime.now(timezone.utc) 
 
 # --- Utility Functions (IP & Sanitization) ---
+
+# ... (all other utility functions remain the same) ...
 
 def get_client_ip(req):
     """Retrieves the client IP address, accounting for proxies like Render."""
@@ -61,6 +64,8 @@ def log_chatter(name, ip):
     if len(chatter_ips) > 100:
         chatter_ips.pop(0)
 
+# --------------------------------------------------------------------------------
+
 # --- API Endpoints ---
 
 @app.route('/messages', methods=['GET'])
@@ -70,6 +75,7 @@ def get_messages():
 
 @app.route('/messages', methods=['POST'])
 def post_message():
+    # ... (function body remains the same) ...
     """Accepts a message, validates/sanitizes it, and checks for bans."""
     client_ip = get_client_ip(request)
     
@@ -118,11 +124,14 @@ def delete_messages():
         return jsonify({"error": "Unauthorized access to delete messages."}), 401
     
     messages = []
-    LAST_WIPE_TIME = datetime.now()
+    # FIX: Use UTC Timezone Aware datetime
+    LAST_WIPE_TIME = datetime.now(timezone.utc)
     print("ALL CHAT MESSAGES CLEARED.")
     return jsonify({"status": "All messages deleted", "wipe_time": LAST_WIPE_TIME.isoformat()}), 200
 
-# --- Admin Endpoints (Require Secret) ---
+# --------------------------------------------------------------------------------
+
+# ... (all admin endpoints remain the same) ...
 
 @app.route('/admin/chatter_list', methods=['GET'])
 def get_chatter_list():
@@ -146,7 +155,7 @@ def get_banned_list():
 
 @app.route('/admin/ban', methods=['POST'])
 def ban_user():
-    """Bans a user by IP, requiring authorization."""
+    # ... (function body remains the same) ...
     if not check_admin_secret(request):
         return jsonify({"error": "Unauthorized access to ban users."}), 401
 
@@ -166,7 +175,7 @@ def ban_user():
 
 @app.route('/admin/unban', methods=['POST'])
 def unban_user():
-    """Unbans a user by IP, requiring authorization."""
+    # ... (function body remains the same) ...
     if not check_admin_secret(request):
         return jsonify({"error": "Unauthorized access to unban users."}), 401
 
@@ -190,6 +199,7 @@ def unban_user():
 @app.route('/check_status', methods=['GET'])
 def check_status():
     """Returns status information, including the last wipe time."""
+    # FIX: Ensure LAST_WIPE_TIME is always formatted correctly (isoformat handles the UTC timezone)
     return jsonify({
         "status": "online",
         "last_wipe_time": LAST_WIPE_TIME.isoformat(),
